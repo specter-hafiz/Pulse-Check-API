@@ -5,9 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
-    "dev": "node --watch --disable-warning=ExperimentalWarning server.js",
-    "test": "node --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --runInBand",
-    "test:watch": "node --disable-warning=ExperimentalWarning node_modules/jest/bin/jest.js --watch --runInBand"
+    "dev": "node --watch --disable-warning=ExperimentalWarning server.js"
   },
   "repository": {
     "type": "git",
@@ -31,10 +29,6 @@
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0",
-    "supertest": "^7.0.0"
   },
   "bugs": {
     "url": "https://github.com/specter-hafiz/Pulse-Check-API/issues"

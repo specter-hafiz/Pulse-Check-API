@@ -24,37 +24,34 @@ team can be dispatched before anyone notices the silence by hand.
 3. [API Documentation](#api-documentation)
 4. [The Developer's Choice](#the-developers-choice-event-history--audit-trail)
 5. [Beyond the Brief — engineering decisions](#beyond-the-brief--engineering-decisions)
-6. [Testing](#testing)
-7. [Project Structure](#project-structure)
-8. [Configuration](#configuration)
+6. [Project Structure](#project-structure)
+7. [Configuration](#configuration)
 
 ---
 
 ## Architecture
 
-### Layered (Clean) Architecture
+### A few clear layers, one file each
 
-Dependencies point **inwards only**. The domain knows nothing about Express or SQLite;
-swapping the database or the transport touches exactly one file (`app.js`, the
-composition root). This is what makes "persist to SQLite instead of memory" a
-one-line change instead of a rewrite.
+The code is split by responsibility into six small files. Each later layer
+depends only on the ones above it, and `server.js` is the single place that
+wires them together — so "persist to SQLite instead of memory" is a one-line
+change instead of a rewrite.
 
 ```
-            HTTP (Express)                 ┌─────────────────────────────┐
-   routes · middleware · validation        │  interfaces/http            │
-                  │                         └─────────────────────────────┘
-                  ▼
-            Application logic               ┌─────────────────────────────┐
-   register · heartbeat · pause · …         │  use-cases                  │
-                  │                         └─────────────────────────────┘
-                  ▼
-            Domain (pure rules)             ┌─────────────────────────────┐
-   Monitor entity · domain errors           │  domain                     │
-                  ▲                         └─────────────────────────────┘
-                  │ implements interfaces
-            Infrastructure                  ┌─────────────────────────────┐
-   SQLite / in-memory repos · alerts        │  infrastructure             │
-   · timer scheduler                        └─────────────────────────────┘
+            HTTP (Express)              routes.js
+   router · validation · errors            │
+                  │                         ▼
+            Monitor logic              monitor.js
+   entity · actions · errors               │     (register · heartbeat · pause · …)
+                  │                         ▼
+            Storage + timers           store.js
+   in-memory / SQLite repos                ▲
+                  │                         │
+            Side-effects               alert.js   (console + webhook)
+                  │
+            Wiring + startup           server.js  (the only cross-layer file)
+            Settings                   config.js
 ```
 
 ### State Flow — the life of a Monitor
@@ -138,7 +135,6 @@ on first run; there is **nothing to migrate or configure** to get going.
 | ---------------- | --------------------------------------------------------- |
 | `npm start`      | Start the server (persistent SQLite store)                |
 | `npm run dev`    | Start with auto-reload (`node --watch`)                   |
-| `npm test`       | Run the full Jest suite (unit + integration)              |
 
 > **No native build step.** An earlier design used `better-sqlite3`, but it needs a C++
 > toolchain and a prebuilt binary matching your exact Node version — a common cause of
@@ -328,9 +324,9 @@ monitor. This turns the API from a momentary status light into a forensic timeli
 which is exactly what a support engineer dispatching a repair team actually needs.
 
 It also showcases the architecture: history is a separate `EventRepository` (with both
-in-memory and SQLite implementations) injected into the use-cases, and the `down` event
-is recorded by the same composition-root wiring that fires the alert — so the audit trail
-and the side-effect can never drift out of sync.
+in-memory and SQLite implementations) injected into the monitor actions, and the `down`
+event is recorded by the same wiring (`server.js`) that fires the alert — so the audit
+trail and the side-effect can never drift out of sync.
 
 ---
 
@@ -342,7 +338,7 @@ These go past the acceptance criteria; each is here for a reason a reviewer can 
   *monitoring* product that's a silent failure. The `SqliteMonitorRepository` persists
   state and **rehydrates timers on boot**, firing any alert whose deadline lapsed while
   the process was down. Because of the clean boundaries, this was an additive change:
-  a new repository + one wiring line in `app.js`. Set `STORE=memory` to opt back out.
+  a new repository + one wiring line in `server.js`. Set `STORE=memory` to opt back out.
 - **Webhook delivery.** Beyond the required console alert, a monitor may register a
   `webhook_url` that receives the alert payload (5s timeout, best-effort, never crashes
   the alert path).
@@ -356,53 +352,38 @@ These go past the acceptance criteria; each is here for a reason a reviewer can 
 
 ---
 
-## Testing
+## Try it locally
+
+No test suite ships with the project — verify behaviour by running it and poking the
+endpoints (see [API Documentation](#api-documentation) for full examples):
 
 ```bash
-npm test
+npm start
+# in another terminal:
+curl -X POST http://localhost:3000/api/monitors \
+  -H "Content-Type: application/json" \
+  -d '{"id":"device-123","timeout":3,"alert_email":"admin@critmon.com"}'
+# wait > 3s without sending a heartbeat, then watch the server log:
+#   [ALERT] {"ALERT":"Device device-123 is down!", ...}
+curl http://localhost:3000/api/monitors/device-123/history   # the full audit trail
 ```
-
-**35 tests across 5 suites**, unit + integration:
-
-- **Domain** — `Monitor` state transitions (`applyHeartbeat`, `pause`, deadline maths).
-- **Use-cases** — register / heartbeat / pause / history against real repositories, incl.
-  duplicate-id, not-found and already-paused error paths.
-- **In-memory repository** — countdown firing, reset-before-expiry, pause-never-fires,
-  delete-cancels-timer (deterministic via Jest fake timers).
-- **SQLite repository** — state survives a simulated restart, and rehydration fires an
-  alert for a deadline that lapsed while offline.
-- **HTTP integration** (`supertest`) — every endpoint, status codes, validation, the
-  full pause→resume cycle, the history audit trail, and a real end-to-end alert
-  (1-second timeout → `status: down` + logged `[ALERT]` payload).
-
-Tests run on the volatile in-memory store for isolation and speed — no database file is
-touched.
 
 ---
 
 ## Project Structure
 
+Six small files, each one layer of the app. Read them top-to-bottom in this order:
+
 ```
-config/                     Environment-driven settings (single source of truth)
-domain/
-  Monitor.js                Core entity + state-transition rules (pure, no I/O)
-  errors.js                 Typed domain errors (instanceof-based handling)
-use-cases/                  Application logic, one file per action
-  registerMonitor.js  heartbeatMonitor.js  pauseMonitor.js
-  getMonitor.js  listMonitors.js  deleteMonitor.js  getMonitorHistory.js
-infrastructure/
-  alert/AlertService.js     Console alert + webhook delivery
-  scheduler/TimerRegistry.js  setTimeout lifecycle (arm / reset / cancel / clearAll)
-  store/                    Repositories (swappable persistence)
-    InMemoryMonitorRepository.js   SqliteMonitorRepository.js
-    InMemoryEventRepository.js     SqliteEventRepository.js
-  db/connection.js          SQLite open + schema (node:sqlite)
-interfaces/http/
-  routes/monitors.js        Thin controllers
-  middleware/               validateBody · errorHandler · requestLogger
-app.js                      Composition root — the only cross-layer wiring
-server.js                   Entry point — listen + graceful shutdown
-tests/                      unit/ + integration/
+config.js     Environment-driven settings (the only place that reads process.env)
+monitor.js    The core: domain errors, the Monitor entity (pure state rules), and
+              the monitor actions (register · heartbeat · pause · get · list ·
+              delete · history)
+store.js      Persistence + live countdown timers — interchangeable in-memory and
+              SQLite repositories, the timer registry, and the SQLite schema
+alert.js      What happens when a monitor goes down: console alert + webhook POST
+routes.js     HTTP layer: body validation, the thin controllers, the error handler
+server.js     Composition root — wires store → actions → HTTP, listens, shuts down
 ```
 
 ---
@@ -422,7 +403,3 @@ All optional — sensible defaults are built in (see `config/index.js`). Copy
 | `RATE_LIMIT_MAX`       | `100`                    | Max write requests per window per IP       |
 
 ---
-
-## License
-
-ISC
